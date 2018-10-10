@@ -21,6 +21,7 @@ namespace GitCommands.Submodules
     public sealed class SubmoduleStatusProvider : ISubmoduleStatusProvider
     {
         private readonly CancellationTokenSequence _submodulesStatusSequence = new CancellationTokenSequence();
+        private DateTime _previousSubmoduleUpdateTime;
 
         public void Dispose()
         {
@@ -29,7 +30,10 @@ namespace GitCommands.Submodules
 
         public bool HasSubmodulesStatusChanged([CanBeNull] IReadOnlyList<GitItemStatus> allChangedFiles)
         {
-            if (allChangedFiles == null)
+            TimeSpan elapsed = DateTime.Now - _previousSubmoduleUpdateTime;
+
+            // Throttle updates triggered from status updates
+            if (allChangedFiles == null || elapsed.TotalSeconds <= 15)
             {
                 return false;
             }
@@ -47,6 +51,7 @@ namespace GitCommands.Submodules
         {
             // Cancel any previous async activities:
             var cancelToken = _submodulesStatusSequence.Next();
+            _previousSubmoduleUpdateTime = DateTime.Now;
 
             onUpdateBegin();
 
@@ -61,12 +66,16 @@ namespace GitCommands.Submodules
                 var result = new SubmoduleInfoResult();
 
                 // Add all submodules inside the current repository:
-                GetRepositorySubmodulesStatus(result, threadModule, cancelToken, noBranchText);
+                var submodulesTask = GetRepositorySubmodulesStatusAsync(result, threadModule, cancelToken, noBranchText);
 
-                GetSuperProjectRepositorySubmodulesStatus(result, threadModule, cancelToken, noBranchText);
+                var superTask = GetSuperProjectRepositorySubmodulesStatusAsync(result, threadModule, cancelToken, noBranchText);
+
+                await Task.WhenAll(submodulesTask, superTask);
 
                 await onUpdateCompleteAsync(result, cancelToken);
-            });
+
+                _previousSubmoduleUpdateTime = DateTime.Now;
+            }).FileAndForget();
         }
 
         [NotNull]
@@ -87,8 +96,9 @@ namespace GitCommands.Submodules
             return topSuperModule;
         }
 
-        private void GetRepositorySubmodulesStatus(SubmoduleInfoResult result, IGitModule module, CancellationToken cancelToken, string noBranchText)
+        private async Task GetRepositorySubmodulesStatusAsync(SubmoduleInfoResult result, IGitModule module, CancellationToken cancelToken, string noBranchText)
         {
+            List<Task> tasks = new List<Task>();
             foreach (var submodule in module.GetSubmodulesLocalPaths().OrderBy(submoduleName => submoduleName))
             {
                 cancelToken.ThrowIfCancellationRequested();
@@ -101,8 +111,10 @@ namespace GitCommands.Submodules
 
                 var smi = new SubmoduleInfo { Text = name, Path = path };
                 result.OurSubmodules.Add(smi);
-                GetSubmoduleStatusAsync(smi, cancelToken).FileAndForget();
+                tasks.Add(GetSubmoduleStatusAsync(smi, cancelToken));
             }
+
+            await Task.WhenAll(tasks);
         }
 
         private async Task GetSubmoduleStatusAsync(SubmoduleInfo info, CancellationToken cancelToken)
@@ -114,28 +126,37 @@ namespace GitCommands.Submodules
             var supermodule = submodule.SuperprojectModule;
             var submoduleName = submodule.GetCurrentSubmoduleLocalPath();
 
-            info.Status = null;
-
             if (string.IsNullOrEmpty(submoduleName) || supermodule == null)
             {
                 return;
             }
 
-            var submoduleStatus = GitCommandHelpers.GetCurrentSubmoduleChanges(supermodule, submoduleName);
-            if (submoduleStatus != null && submoduleStatus.Commit != submoduleStatus.OldCommit)
+            info.Detailed = new AsyncLazy<DetailedSubmoduleInfo>(async () =>
             {
-                submoduleStatus.CheckSubmoduleStatus(submoduleStatus.GetSubmodule(supermodule));
-            }
+                await TaskScheduler.Default;
+                cancelToken.ThrowIfCancellationRequested();
 
-            if (submoduleStatus != null)
-            {
-                info.Status = submoduleStatus.Status;
-                info.IsDirty = submoduleStatus.IsDirty;
-                info.Text += submoduleStatus.AddedAndRemovedString();
-            }
+                var submoduleStatus = GitCommandHelpers.GetCurrentSubmoduleChanges(supermodule, submoduleName);
+                if (submoduleStatus != null && submoduleStatus.Commit != submoduleStatus.OldCommit)
+                {
+                    submoduleStatus.CheckSubmoduleStatus(submoduleStatus.GetSubmodule(supermodule));
+                }
+
+                if (submoduleStatus != null)
+                {
+                    return new DetailedSubmoduleInfo()
+                    {
+                        Status = submoduleStatus.Status,
+                        IsDirty = submoduleStatus.IsDirty,
+                        AddedAndRemovedText = submoduleStatus.AddedAndRemovedString()
+                    };
+                }
+
+                return null;
+            }, ThreadHelper.JoinableTaskFactory);
         }
 
-        private void GetSuperProjectRepositorySubmodulesStatus(SubmoduleInfoResult result, GitModule module, CancellationToken cancelToken, string noBranchText)
+        private async Task GetSuperProjectRepositorySubmodulesStatusAsync(SubmoduleInfoResult result, GitModule module, CancellationToken cancelToken, string noBranchText)
         {
             if (module.SuperprojectModule == null)
             {
@@ -154,7 +175,7 @@ namespace GitCommands.Submodules
                 }
 
                 result.TopProject = new SubmoduleInfo { Text = name, Path = supersuperproject.WorkingDir };
-                GetSubmoduleStatusAsync(result.TopProject, cancelToken).FileAndForget();
+                await GetSubmoduleStatusAsync(result.TopProject, cancelToken);
             }
 
             if (module.SuperprojectModule.WorkingDir != supersuperproject.WorkingDir)
@@ -175,13 +196,15 @@ namespace GitCommands.Submodules
             }
 
             result.SuperProject = new SubmoduleInfo { Text = name, Path = module.SuperprojectModule.WorkingDir };
-            GetSubmoduleStatusAsync(result.SuperProject, cancelToken).FileAndForget();
+            await GetSubmoduleStatusAsync(result.SuperProject, cancelToken);
 
             var submodules = supersuperproject.GetSubmodulesLocalPaths().OrderBy(submoduleName => submoduleName).ToArray();
             if (submodules.Any())
             {
                 string localPath = module.WorkingDir.Substring(supersuperproject.WorkingDir.Length);
                 localPath = PathUtil.GetDirectoryName(localPath.ToPosixPath());
+
+                List<Task> subTasks = new List<Task>();
 
                 foreach (var submodule in submodules)
                 {
@@ -202,8 +225,10 @@ namespace GitCommands.Submodules
 
                     var smi = new SubmoduleInfo { Text = name, Path = path, Bold = bold };
                     result.SuperSubmodules.Add(smi);
-                    GetSubmoduleStatusAsync(smi, cancelToken).FileAndForget();
+                    subTasks.Add(GetSubmoduleStatusAsync(smi, cancelToken));
                 }
+
+                await Task.WhenAll(subTasks);
             }
         }
 

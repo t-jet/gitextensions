@@ -629,7 +629,7 @@ namespace GitUI.Properties {
                 return ((System.Drawing.Bitmap)(obj));
             }
         }
-        
+
         /// <summary>
         ///   Looks up a localized resource of type System.Drawing.Bitmap.
         /// </summary>
@@ -639,7 +639,18 @@ namespace GitUI.Properties {
                 return ((System.Drawing.Bitmap)(obj));
             }
         }
-        
+
+        /// <summary>
+        ///   Looks up a localized resource of type System.Drawing.Bitmap.
+        /// </summary>
+        public static System.Drawing.Bitmap DeleteFile {
+            get
+            {
+                object obj = ResourceManager.GetObject("DeleteFile", resourceCulture);
+                return ((System.Drawing.Bitmap)(obj));
+            }
+        }
+
         /// <summary>
         ///   Looks up a localized resource of type System.Drawing.Bitmap.
         /// </summary>
@@ -1876,6 +1887,16 @@ namespace GitUI.Properties {
         public static System.Drawing.Bitmap StarDeselected {
             get {
                 object obj = ResourceManager.GetObject("StarDeselected", resourceCulture);
+                return ((System.Drawing.Bitmap)(obj));
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized resource of type System.Drawing.Bitmap.
+        /// </summary>
+        public static System.Drawing.Bitmap StarRemove {
+            get {
+                object obj = ResourceManager.GetObject("StarRemove", resourceCulture);
                 return ((System.Drawing.Bitmap)(obj));
             }
         }
